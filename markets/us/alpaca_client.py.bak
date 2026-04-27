@@ -1,0 +1,341 @@
+"""
+markets/us/alpaca_client.py — RossTrader_US
+
+Alpaca API 미국 주식 매매 클라이언트.
+AbstractMarket 인터페이스를 구현.
+
+Alpaca Paper Trading API v2:
+  Base URL: https://paper-api.alpaca.markets/v2
+  Alpaca-py 라이브러리 사용
+
+사용 예:
+    client = AlpacaClient()
+    result = client.buy("AAPL", qty=1)
+    price = client.get_price("TSLA")
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+from typing import List, Optional
+
+from config.settings import settings
+from markets.base import AbstractMarket, OrderResult, PriceInfo, BalanceInfo
+from markets.us.us_session import us_session
+
+logger = logging.getLogger(__name__)
+
+# Alpaca-py import (선택적)
+try:
+    import alpaca
+    from alpaca.trading.client import TradingClient
+    from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
+    from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.requests import StockLatestQuoteRequest
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+    _ALPACA_AVAILABLE = True
+except ImportError:
+    _ALPACA_AVAILABLE = False
+    logger.warning("[AlpacaClient] alpaca-py 미설치. pip3 install alpaca-py 필요")
+
+
+class AlpacaClient(AbstractMarket):
+    """
+    Alpaca API 미국 주식 매매 클라이언트.
+    AbstractMarket 인터페이스 구현.
+    """
+
+    def __init__(self):
+        self.api_key = settings.alpaca.api_key
+        self.api_secret = settings.alpaca.api_secret
+        self.base_url = settings.alpaca.base_url
+        self.is_paper = settings.alpaca.is_paper
+
+        self._trading_client = None
+        self._data_client = None
+
+        if _ALPACA_AVAILABLE and self.api_key and self.api_secret:
+            try:
+                self._trading_client = TradingClient(
+                    api_key=self.api_key,
+                    secret_key=self.api_secret,
+                    paper=self.is_paper,
+                )
+                self._data_client = StockHistoricalDataClient(
+                    api_key=self.api_key,
+                    secret_key=self.api_secret,
+                )
+                logger.info(
+                    "[AlpacaClient] 초기화 완료 | 모드: %s",
+                    "Paper(모의투자)" if self.is_paper else "Live(실거래)",
+                )
+            except Exception as e:
+                logger.error("[AlpacaClient] 초기화 실패: %s", e)
+        else:
+            logger.warning("[AlpacaClient] API 키 미설정 또는 alpaca-py 미설치")
+
+    # ── AbstractMarket 구현 ─────────────────────────────
+
+    def is_tradeable(self) -> bool:
+        """Alpaca는 24/5 거래 가능 (정규장 + 프리/애프터마켓)."""
+        if not _ALPACA_AVAILABLE:
+            return False
+        # Alpaca는 프리마켓/애프터마켓도 지원하므로 us_session.is_tradeable() 사용 안 함
+        # 기본적으로 평일에는 거래 가능
+        return us_session.is_weekday() and not us_session.is_us_holiday()
+
+    def buy(
+        self,
+        ticker: str,
+        qty: int,
+        price: float = 0.0,
+    ) -> OrderResult:
+        """미국 주식 매수."""
+        if not self.is_tradeable():
+            return OrderResult(
+                success=False,
+                error_msg=f"거래 불가 시간 (주말/휴장일)",
+            )
+
+        if not self._check_client():
+            return OrderResult(success=False, error_msg="AlpacaClient 미초기화")
+
+        try:
+            if price > 0:
+                order = LimitOrderRequest(
+                    symbol=ticker.upper(),
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    type=OrderType.LIMIT,
+                    limit_price=price,
+                    time_in_force=TimeInForce.DAY,
+                )
+            else:
+                order = MarketOrderRequest(
+                    symbol=ticker.upper(),
+                    qty=qty,
+                    side=OrderSide.BUY,
+                    type=OrderType.MARKET,
+                    time_in_force=TimeInForce.DAY,
+                )
+
+            submitted = self._trading_client.submit_order(order)
+
+            logger.info(
+                "[AlpacaClient] 매수 성공 | %s %d주 @ $%.2f | 주문ID: %s",
+                ticker, qty, price, submitted.id,
+            )
+            return OrderResult(
+                success=True,
+                order_no=submitted.id,
+                ticker=ticker,
+                exchange=settings.alpaca.default_exchange,
+                direction="buy",
+                qty=qty,
+                price=float(submitted.limit_price or submitted.filled_avg_price or price),
+                raw_response=submitted.__dict__ if hasattr(submitted, '__dict__') else {},
+            )
+        except Exception as e:
+            logger.error("[AlpacaClient] 매수 실패 | %s | %s", ticker, e)
+            return OrderResult(success=False, ticker=ticker, error_msg=str(e))
+
+    def sell(
+        self,
+        ticker: str,
+        qty: int,
+        price: float = 0.0,
+    ) -> OrderResult:
+        """미국 주식 매도."""
+        if not self.is_tradeable():
+            return OrderResult(
+                success=False,
+                error_msg="거래 불가 시간 (주말/휴장일)",
+            )
+
+        if not self._check_client():
+            return OrderResult(success=False, error_msg="AlpacaClient 미초기화")
+
+        try:
+            if price > 0:
+                order = LimitOrderRequest(
+                    symbol=ticker.upper(),
+                    qty=qty,
+                    side=OrderSide.SELL,
+                    type=OrderType.LIMIT,
+                    limit_price=price,
+                    time_in_force=TimeInForce.DAY,
+                )
+            else:
+                order = MarketOrderRequest(
+                    symbol=ticker.upper(),
+                    qty=qty,
+                    side=OrderSide.SELL,
+                    type=OrderType.MARKET,
+                    time_in_force=TimeInForce.DAY,
+                )
+
+            submitted = self._trading_client.submit_order(order)
+
+            logger.info(
+                "[AlpacaClient] 매도 성공 | %s %d주 @ $%.2f | 주문ID: %s",
+                ticker, qty, price, submitted.id,
+            )
+            return OrderResult(
+                success=True,
+                order_no=submitted.id,
+                ticker=ticker,
+                exchange=settings.alpaca.default_exchange,
+                direction="sell",
+                qty=qty,
+                price=float(submitted.limit_price or submitted.filled_avg_price or price),
+                raw_response=submitted.__dict__ if hasattr(submitted, '__dict__') else {},
+            )
+        except Exception as e:
+            logger.error("[AlpacaClient] 매도 실패 | %s | %s", ticker, e)
+            return OrderResult(success=False, ticker=ticker, error_msg=str(e))
+
+    def get_price(self, ticker: str) -> Optional[PriceInfo]:
+        """미국 주식 현재가 조회 (Alpaca Market Data API)."""
+        if not self._check_client():
+            return None
+
+        try:
+            request = StockLatestQuoteRequest(symbol_or_symbols=ticker.upper())
+            quotes = self._data_client.get_stock_latest_quote(request)
+
+            if ticker.upper() not in quotes:
+                logger.warning("[AlpacaClient] 시세 없음 | %s", ticker)
+                return None
+
+            quote = quotes[ticker.upper()]
+
+            return PriceInfo(
+                ticker=ticker,
+                exchange=settings.alpaca.default_exchange,
+                price=float(quote.ask_price or quote.bid_price or 0),
+                open=0.0,   # Alpaca latest quote는 시가 정보 없음
+                high=0.0,
+                low=0.0,
+                volume=0,
+                change_pct=0.0,
+                timestamp=quote.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        except Exception as e:
+            logger.error("[AlpacaClient] 시세 조회 실패 | %s | %s", ticker, e)
+            return None
+
+    def get_balance(self) -> BalanceInfo:
+        """계좌 잔고 및 포지션 조회."""
+        if not self._check_client():
+            return BalanceInfo()
+
+        try:
+            account = self._trading_client.get_account()
+            positions_raw = self._trading_client.get_all_positions()
+
+            total_usd = float(account.portfolio_value or 0)
+            cash_usd = float(account.cash or 0)
+
+            positions = []
+            for pos in positions_raw:
+                try:
+                    positions.append({
+                        "ticker": pos.symbol,
+                        "name": pos.symbol,
+                        "qty": int(float(pos.qty or 0)),
+                        "avg_price": float(pos.avg_entry_price or 0),
+                        "current_price": float(pos.current_price or 0),
+                        "total_value": float(pos.market_value or 0),
+                        "profit_pct": float(pos.unrealized_plpc or 0) * 100,
+                    })
+                except Exception:
+                    continue
+
+            logger.info(
+                "[AlpacaClient] 잔고 조회 완료 | total=$%.2f | cash=$%.2f | positions=%d",
+                total_usd, cash_usd, len(positions),
+            )
+            return BalanceInfo(
+                total_usd=total_usd,
+                cash_usd=cash_usd,
+                positions=positions,
+            )
+        except Exception as e:
+            logger.error("[AlpacaClient] 잔고 조회 실패: %s", e)
+            return BalanceInfo()
+
+    def to_base_currency(self, amount: float) -> float:
+        """USD → KRW 변환."""
+        try:
+            from utils.forex_manager import ForexManager
+            return ForexManager().get_usd_krw() * amount
+        except Exception:
+            return settings.us.usd_krw_fallback * amount
+
+    def collect_news(self, tickers: List[str]) -> list:
+        """뉴스 수집 (USNewsAggregator 위임)."""
+        try:
+            from markets.us.us_news_collector import USNewsAggregator
+            aggregator = USNewsAggregator()
+            return aggregator.collect(tickers)
+        except Exception as e:
+            logger.error("[AlpacaClient] 뉴스 수집 실패: %s", e)
+            return []
+
+    def get_market_status(self) -> dict:
+        """시장 상태 요약."""
+        status = us_session.session_summary()
+        status["broker"] = "Alpaca"
+        status["mode"] = "paper" if self.is_paper else "live"
+        return status
+
+    # ── Internal ─────────────────────────────────────────
+
+    def _check_client(self) -> bool:
+        """Alpaca 클라이언트 초기화 여부 확인."""
+        if not _ALPACA_AVAILABLE:
+            logger.warning("[AlpacaClient] alpaca-py 미설치")
+            return False
+        if not self._trading_client:
+            logger.warning("[AlpacaClient] TradingClient 미초기화")
+            return False
+        return True
+
+    def get_account_info(self) -> dict:
+        """계좌 정보 조회 (상세)."""
+        if not self._check_client():
+            return {}
+        try:
+            account = self._trading_client.get_account()
+            return {
+                "id": account.id,
+                "status": account.status,
+                "cash": float(account.cash or 0),
+                "portfolio_value": float(account.portfolio_value or 0),
+                "buying_power": float(account.buying_power or 0),
+                "daytrade_count": account.daytrade_count or 0,
+                "pattern_day_trader": account.pattern_day_trader,
+            }
+        except Exception as e:
+            logger.error("[AlpacaClient] 계좌 정보 조회 실패: %s", e)
+            return {}
+
+    def get_positions(self) -> List[dict]:
+        """현재 포지션 목록."""
+        bal = self.get_balance()
+        return bal.positions
+
+    def cancel_all_orders(self) -> bool:
+        """모든 미체결 주문 취소."""
+        if not self._check_client():
+            return False
+        try:
+            self._trading_client.cancel_orders()
+            logger.info("[AlpacaClient] 모든 주문 취소 완료")
+            return True
+        except Exception as e:
+            logger.error("[AlpacaClient] 주문 취소 실패: %s", e)
+            return False

@@ -1,0 +1,78 @@
+RossTrader_US/                      ★ 미국 주식 AI 뉴스 기반 자동매매 시스템 ★
+
+├── main.py                          # 진입점
+├── run.sh                           # 실행 스크립트
+├── requirements.txt                 # 의존성 목록
+├── config.json                      # 사용자 설정
+├── .env / .env.example              # API 키 환경변수
+│
+├── config/                          ─── 설정/상수
+│   ├── __init__.py
+│   ├── constants.py                 # 수수료, Factor 가중치, 임계값, 진입/청산 조건
+│   └── settings.py                  # Pydantic 설정 (KIS, Finnhub, Telegram 등)
+│
+├── core/                            ─── ★ 트레이딩 코어 엔진 ★
+│   ├── __init__.py
+│   ├── trading_engine.py            # 메인 트레이딩 루프 (start/stop/drain/_run_loop/_cycle)
+│   ├── entry_engine.py              # 진입 전략 (ORB, Gap, EntrySignal 평가)
+│   ├── exit_manager.py              # 청산 관리 (Trailing Stop, ExitReason)
+│   ├── factor_engine.py             # 팩터 스코어링 (수급/모멘텀/뉴스/기술적)
+│   ├── signal_pipeline.py           # 시그널 파이프라인 (필터→랭킹→사이징→실행)
+│   ├── position_sizer.py            # 포지션 사이징 (자본 대비 수량)
+│   ├── portfolio_manager.py         # 포트폴리오 관리 (섹터 노출, 리밸런싱)
+│   ├── risk_manager.py              # 리스크 관리 (Kill Switch, 일일 손실 한도)
+│   ├── pre_trade_risk_gateway.py    # 사전 거래 리스크 체크
+│   ├── veto_filter.py               # 거부 필터 (강한 이벤트 감지)
+│   └── market_regime.py             # 시장 국면 감지 (VIX 기반 MarketRegime)
+│
+├── markets/                         ─── ★ 브로커/시장 연결 ★
+│   ├── __init__.py
+│   ├── base.py                      # AbstractMarket 추상 클래스 (OrderResult, PriceInfo, BalanceInfo)
+│   └── us/
+│       ├── __init__.py
+│       ├── kis_client.py            # 한국투자증권 해외주식 API (매매/잔고/시세)
+│       ├── us_session.py            # 미국 장 세션 (정규/프리/애프터마켓, ORB)
+│       ├── us_universe.py           # 미국 종목 DB (섹터, 시총, 워치리스트)
+│       ├── us_news_collector.py     # 뉴스 수집 (Finnhub API + SEC EDGAR RSS)
+│       └── alpaca_client.py.bak     # (백업) Alpaca API
+│
+├── nlp/                             ─── ★ 자연어 처리 (뉴스 감성 분석) ★
+│   ├── __init__.py
+│   ├── news_processor.py            # 뉴스 전처리 (키워드 추출, 텍스트 클리닝)
+│   ├── en_sentiment.py              # 영어 감성 분석 (VADER + 규칙 기반)
+│   └── finbert_scorer.py            # FinBERT 딥러닝 감성 점수
+│
+├── utils/                           ─── ★ 유틸리티 ★
+│   ├── __init__.py
+│   ├── news_trader.py               # NewsTraderThread (QThread) — 실시간 매매 스레드
+│   ├── config_loader.py             # 설정 파일 로드/저장
+│   ├── forex_manager.py             # USD/KRW 환율 관리 (KIS API)
+│   ├── performance_tracker.py       # 거래 성과 추적 (TradeRecord, DailyPerformance)
+│   └── trade_db.py                  # 거래 내역 (JSON 파일 기반)
+│
+└── gui/                             ─── ★ PyQt5 GUI ★
+    ├── __init__.py
+    ├── main_window.py               # 메인 윈도우 (시장지표, 포지션, 로그, 설정)
+    ├── main_window_controller.py    # 컨트롤러 (비즈니스 로직 분리)
+    ├── settings_dialog.py           # 설정 다이얼로그 (API/매매/리스크/뉴스)
+    ├── analytics_widget.py          # 분석/통계 위젯 (일일 손익, 승률)
+    └── backtest_widget.py           # 백테스팅 위젯 (QThread 기반)
+
+═══════════════════════════════════════════════════════
+★ 핵심 트레이딩 데이터 흐름 (30초 사이클)
+═══════════════════════════════════════════════════════
+
+NewsTraderThread._cycle()  (utils/news_trader.py)
+    │
+    ├── 1. watchlist 조회 ← us_universe.py
+    ├── 2. 현재가/ORB/Gap 확인 ← kis_client.py + entry_engine.py
+    ├── 3. 뉴스 수집 ← us_news_collector.py
+    ├── 4. 감성 분석 ← nlp/en_sentiment.py + finbert_scorer.py
+    ├── 5. 팩터 스코어링 ← factor_engine.py (수급/모멘텀/뉴스/기술적)
+    ├── 6. 리스크 체크 ← pre_trade_risk_gateway.py + veto_filter.py
+    ├── 7. 포지션 사이징 ← position_sizer.py
+    ├── 8. 매매 실행 ← kis_client.py (buy/sell)
+    └── 9. 포트폴리오 업데이트 ← portfolio_manager.py + performance_tracker.py
+
+ExitManager (실시간 청산 감시)
+    └── Trailing Stop 감시 ← 보유 포지션 현재가 추적 → 청산 신호 발생
