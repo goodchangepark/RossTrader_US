@@ -36,7 +36,7 @@ class ExitReason(Enum):
 
 @dataclass
 class Position:
-    """보유 포지션."""
+    """보유 포지션 (ATR 기반 동적 청산 지원)."""
     ticker: str
     shares: int
     entry_price: float
@@ -51,6 +51,7 @@ class Position:
     remaining_shares: int = 0
     vwap_below_bars: int = 0
     breakeven_moved: bool = False
+    atr_14: float = 0.0           # ATR(14) — 변동성 기반 동적 파라미터용
 
     def __post_init__(self):
         if self.remaining_shares == 0:
